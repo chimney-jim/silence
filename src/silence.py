@@ -47,7 +47,7 @@ class TimestampedKeyEvent():
 
     def __init__(self, key_event):
         self.key_event = key_event
-        self.timestamp = t.time()
+        self.timestamp = to_millis(t.time())
 
     def __str__(self):
         return 'key_event: {}, timestamp: {}'.format(str(self.key_event), self.timestamp)
@@ -61,6 +61,8 @@ class Silence():
 
     current_keys_down = set()
     key_event_buffer = deque(maxlen=4)
+    last_action = None
+    stuck = False
 
     def __init__(self, magic_key, mic_mixer, toggle_timing):
         self.magic_key = magic_key
@@ -84,36 +86,67 @@ class Silence():
             self.current_keys_down,
             key_event_buffer_str)
 
-    def set_key_down(self, pressed_key):
-        key_pressed_event = TimestampedKeyEvent(KeyEvent(pressed_key, 'down'))
-        self.current_keys_down.add(pressed_key)
-        self.key_event_buffer.appendleft(key_pressed_event)
-        if self.magic_key in self.current_keys_down:
-            print('unmuting mic!')
-            self.unmute_mic()
+    def magic_sequence_match(self, key_events):
+        return key_events == self.magic_sequence
 
-    def set_key_up(self, released_key):
-        key_release_event = TimestampedKeyEvent(KeyEvent(released_key, 'up'))
-        if released_key in self.current_keys_down:
-            self.current_keys_down.remove(released_key)
-        self.key_event_buffer.appendleft(key_release_event)
+    def pressed_twice_rapidly(self, timestamp_key_events):
+        timestamp_key_up_last, timestamp_key_up_first = [
+            tke.timestamp for tke in timestamp_key_events
+            if tke.key_event.direction == 'up']
+        timestamp_key_up_delta = timestamp_key_up_last - timestamp_key_up_first
+        print('timestamp_last: {}'.format(timestamp_key_up_last))
+        print('timestamp_first: {}'.format(timestamp_key_up_first))
+        print('timestamp delta: {}'.format(timestamp_key_up_delta))
+        return timestamp_key_up_delta < self.toggle_timing
 
-        timestamp_key_events = list(self.key_event_buffer)
-        key_events = [tke.key_event for tke in timestamp_key_events]
-        # print([str(ke) for ke in key_event_list])
-        if key_events == self.magic_sequence:
-            print('magic sequence match!!')
-            timestamp_key_up_last, timestamp_key_up_first = [
-                tke.timestamp for tke in timestamp_key_events
-                if tke.key_event.direction == 'up']
-            timestamp_key_up_delta = timestamp_key_up_last - timestamp_key_up_first
-            if timestamp_key_up_delta < self.toggle_timing:
-                print('timing is correct!')
-                self.key_event_buffer.clear()
+    def get_nth_key_event(self, n):
+        return list(self.key_event_buffer)[n]
+
+    def determin_action(self, timestamp_key_event):
+        key_event = timestamp_key_event.key_event
+        timestamp_key_events_list = list(self.key_event_buffer)
+        key_event_list = [tke.key_event for tke in timestamp_key_events_list]
+        print(key_event)
+        print([str(ke) for ke in key_event_list])
+        if key_event.direction == 'up':
+            print('key up')
+            if self.magic_sequence_match(key_event_list) \
+            and self.pressed_twice_rapidly(timestamp_key_events_list):
                 self.toggle_mic()
-        elif self.magic_key not in self.current_keys_down and key_events[0].key == self.magic_key:
-            print('muting_mic')
-            self.mute_mic()
+            elif self.magic_key not in self.current_keys_down:
+                self.toggle_mic()
+            else:
+                pass
+        elif key_event.direction == 'down':
+            print('key down')
+            this_key_event = self.get_nth_key_event(0).key_event
+            last_key_event = None
+            try:
+                last_key_event = self.get_nth_key_event(1).key_event
+            except:
+                pass
+            if self.magic_key in self.current_keys_down:
+                if last_key_event is not None and this_key_event == last_key_event:
+                    return None
+                else:
+                    self.toggle_mic()
+        else:
+            return None
+
+    def set_key_down(self, key):
+        key_event = TimestampedKeyEvent(KeyEvent(key, 'down'))
+        self.current_keys_down.add(key)
+        self.key_event_buffer.appendleft(key_event)
+        if key == self.magic_key:
+            self.determin_action(key_event)
+
+    def set_key_up(self, key):
+        key_event = TimestampedKeyEvent(KeyEvent(key, 'up'))
+        if key in self.current_keys_down:
+            self.current_keys_down.remove(key)
+        self.key_event_buffer.appendleft(key_event)
+        if key == self.magic_key:
+            self.determin_action(key_event)
 
     def is_recording(self):
         is_recording_r, is_recording_l = self.mic_mixer.getrec()
@@ -123,10 +156,10 @@ class Silence():
             return False
 
     def toggle_mic(self):
-        if not self.is_recording():
-            self.mic_mixer.setrec(1)
+        if self.is_recording():
+            self.mute_mic()
         else:
-            self.mic_mixer.setrec(0)
+            self.unmute_mic()
 
     def mute_mic(self):
         if self.is_recording():
@@ -136,7 +169,7 @@ class Silence():
         if not self.is_recording():
             self.mic_mixer.setrec(1)
 
-silence = Silence(Key.f1, alsaaudio.Mixer(control='Capture'), 100)
+silence = Silence(Key.f1, alsaaudio.Mixer(control='Capture'), 200)
 
 def on_press(key):
     silence.set_key_down(key)
